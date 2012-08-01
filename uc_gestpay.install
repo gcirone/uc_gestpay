@@ -1,0 +1,15 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for the uc_gestpay module.
+ */
+
+/**
+ * Implements hook_uninstall().
+ */
+function uc_gestpay_uninstall() {
+  db_delete('variable')
+    ->condition('name', 'uc_gestpay_%', 'LIKE')
+    ->execute();
+}

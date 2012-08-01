@@ -1,0 +1,349 @@
+<?php
+
+/**
+ * @file
+ * Integrates Gestpay by Banca Sella (http://wwww.easynolo.it) redirected payment service.
+ */
+
+/**
+ * Implementation of hook_menu().
+ */
+function uc_gestpay_menu() {
+  
+   $items['cart/gestpay/positive'] = array(
+    'title' => 'Order complete positive',
+    'page callback' => 'uc_gestpay_process_response',
+    'page arguments' => array(FALSE),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  
+	$items['cart/gestpay/negative'] = array(
+    'title' => 'Order complete negative',
+    'page callback' => 'uc_gestpay_process_response',
+    'page arguments' => array(FALSE),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  
+  $items['cart/gestpay/server'] = array(
+    'title' => 'Server to Server page',
+    'page callback' => 'uc_gestpay_process_response',
+    'page arguments' => array(TRUE),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  
+  return $items;
+}
+
+
+/**
+ * Implementation of hook_payment_method().
+ */
+function uc_gestpay_uc_payment_method() {
+  
+  $path = base_path() . drupal_get_path('module', 'uc_gestpay');
+  $title = '<span class="gestpay-title">'.variable_get('uc_gestpay_method_title', t('Credit card on a secure server:')).'</span>';
+  $title .= '<br /><img src="'. $path .'/img/gestpay_cc.gif" class="gestpay-cc-icon">';	
+  
+  $methods[] = array(
+    'id' => 'gestpay',
+    'name' => t('Gestpay Banca Sella'),
+    'title' => $title,
+    'desc' => t('Redirect to gestpay to pay by credit card or eCheck.'),
+    'callback' => 'uc_payment_method_gestpay',
+    'weight' => 3,
+    'checkout' => TRUE,
+    'no_gateway' => TRUE,
+  );
+  
+  return $methods;
+  
+}
+
+
+/**
+ * Payment method settings.
+ */
+function uc_payment_method_gestpay($op, &$order, $form = NULL, &$form_state = NULL)  {
+  
+  switch ($op) {
+    
+    case 'cart-process':
+      $_SESSION['pay_method'] = $form_state['values']['panes']['payment']['payment_method'];
+      return;
+    break;
+    
+    case 'settings':
+		  
+      $form['uc_gestpay_sid'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Vendor ID number'),
+        '#description' => t('Your Gestpay vendor id.'),
+        '#default_value' => variable_get('uc_gestpay_sid', ''),
+        '#size' => 16,
+      );
+      
+      $form['uc_gestpay_demo'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('Enable demo mode, allowing you to process fake orders for testing purposes.'),
+        '#default_value' => variable_get('uc_gestpay_demo', TRUE),
+      );
+      
+      $form['uc_gestpay_language'] = array(
+        '#type' => 'select',
+        '#title' => t('Language preference'),
+        '#description' => t('Adjust language on gestpay pages.'),
+        '#options' => array(
+          '1' => t('Italian'),
+          '2' => t('English'),
+          '3' => t('Español'),
+          '4' => t('Français'),
+          '5' => t('Deutsch'),
+        ),
+        '#default_value' => variable_get('uc_gestpay_language', '1'),
+      );
+      
+      $form['uc_gestpay_currency'] = array(
+        '#type' => 'select',
+        '#title' => t('Currency preference'),
+        '#description' => t('Adjust currency used with gestpay.'),
+        '#options' => array(
+          '1' => 'USD (US Dollar $)',
+          '2' => 'GBP (Pound Sterling £)',
+          '71' => 'JPY (Japanese Yen)',
+          '71' => 'HKD (Hong Kong Dollar)',
+          '242' => 'EUR (Euro €)',
+          #'234' => 'BRL Real',
+        ),
+        '#default_value' => variable_get('uc_gestpay_currency', '242'),
+      );
+      
+      $form['uc_gestpay_method_title'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Payment method title'),
+        '#default_value' => variable_get('uc_gestpay_method_title', t('Credit card on a secure server:')),
+      );
+            
+      $form['uc_gestpay_method_title_icons'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('Show credit card icons beside the payment method title.'),
+        '#default_value' => variable_get('uc_gestpay_method_title_icons', TRUE),
+      );
+      
+      $form['uc_gestpay_checkout_button'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Order review submit button text'),
+        '#description' => t('Provide gestpay specific text for the submit button on the order review page.'),
+        '#default_value' => variable_get('uc_gestpay_checkout_button', t('Submit Order')),
+      );
+      
+      
+      /*** options for webform ***/
+      $webform_nodes = array(
+        '' => t("None"),
+      );
+      $webforms = node_load_multiple(NULL, array('type' => 'webform'));
+      if (!is_array($webforms)) $webforms = array($webforms);
+      if ($webforms) {
+        foreach($webforms as $node) {
+          $webform_nodes[$node->nid] = $node->nid.' - '.$node->title;
+        }
+      }
+      $form['uc_gestpay_enable_pos_for_webform'] = array(
+        '#type' => 'select',
+        '#options' => $webform_nodes,
+        '#title' => t('Allow POS payments on webform submit'),
+        '#description' => t('Acquire payment on webform save. BE SURE to include a number field name "amount" in the form definition'),
+        '#default_value' => variable_get('uc_gestpay_enable_pos_for_webform', ''),
+      );
+      
+      return $form;
+    break;
+    
+  }
+  
+}
+
+
+/**
+ * Implementation of hook_form_alter().
+ */
+function uc_gestpay_form_alter(&$form, $form_state, $form_id) {
+   
+  if ($form_id == 'uc_cart_checkout_review_form' &&
+          ($order_id = intval($_SESSION['cart_order'])) > 0) {
+    $order = uc_order_load($order_id);
+    
+    if ($order->payment_method == 'gestpay') {
+        $checkout =  drupal_get_form('uc_gestpay_form', $order) ;
+      unset($form['actions']['submit']);
+      $form['#prefix'] = '<table id="uc-gestpay-review-table"><tr><td>';
+      $form['#suffix'] = '</td><td>' . drupal_render($checkout) . '</td></tr></table>';
+    }
+  }
+  
+}
+
+
+/**
+ * Prepare and return the form to POST to Banca Sella.
+ */
+function uc_gestpay_form($form, &$form_state, $order) {
+    
+  $objCrypt = new GestPayCrypt();
+  $objCrypt->SetDomain(_gestpay_get_domain()); // IMPORTANT ! Set the correct domain do avoid strange errors
+  $objCrypt->SetShopLogin(variable_get('uc_gestpay_sid', ''));
+  $objCrypt->SetCurrency(variable_get('uc_gestpay_currency', ''));
+  $objCrypt->SetAmount(uc_currency_format($order->order_total, FALSE, FALSE, '.'));
+  $objCrypt->SetShopTransactionID($order->order_id);
+  //$objCrypt->SetBuyerName(substr($order->billing_first_name .' '. $order->billing_last_name, 0, 128));
+  //$objCrypt->SetBuyerEmail(substr($order->primary_email, 0, 64));
+  //$objCrypt->SetLanguage(variable_get('uc_gestpay_language','1'));
+  $objCrypt->SetCustomInfo('');
+    
+  // Trying to connect to gateway
+  $objCrypt->Encrypt();
+  $ed = $objCrypt->GetErrorDescription();
+  if($ed != "") {
+    // ERROR - CHECKOUT NOT AUTHORIZED
+    watchdog('gestpay', 'ERROR - CHECKOUT NOT AUTHORIZED. !error_code, !error_description',array('error_code'=>$objCrypt->GetErrorCode(),'!error_description'=>$objCrypt->GetErrorDescription()),WATCHDOG_ERROR );
+    drupal_set_message(t('Sorry, checkout cannot be completed because an error occurred with payment gateway.<br/>Please contact store administrator at <a href="mailto:!store_email">!store_email</a>.<br/>Error code: <b>!error_code</b>, Error description: <b>!error_description</b>',array('!store_email' => variable_get('uc_store_email',''),'!error_code'=>$objCrypt->GetErrorCode(),'!error_description'=>$objCrypt->GetErrorDescription())),'error');
+    drupal_goto('cart');
+  } else {
+    $b = $objCrypt->GetEncryptedString();
+    $a = $objCrypt->GetShopLogin();
+    watchdog('gestpay', 'NOTICE - CHECKOUT AUTHORIZED order !gp_shoptransactionid_id. '.$a.' '.$b,array('!gp_shoptransactionid_id'=>$order->order_id),WATCHDOG_NOTICE);
+  }
+    
+  // Processing response from gateway
+  $data = array(
+    'a' => $a,
+    'b' => $b
+  );
+  $form['#action'] = _gestpay_post_url(variable_get('uc_gestpay_checkout_type', 'multi'));
+  $form['#method'] = 'get';
+  $b = $objCrypt->GetEncryptedString();
+  foreach ($data as $name => $value) {
+    $form[$name] = array('#type' => 'hidden', '#value' => $value);
+  }  
+  
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => variable_get('uc_gestpay_checkout_button', t('Submit Order')),
+  );
+  
+  return $form;
+  
+}
+
+
+/**
+ * Elaborate response from Banca Sella.
+ */
+function uc_gestpay_process_response($serverToServer=TRUE) {
+   
+  $payed = FALSE;
+  // getting response
+  $objCrypt = new GestPayCrypt();
+  $objCrypt->SetDomain(_gestpay_get_domain()); // IMPORTANT ! Set the correct domain do avoid strange errors
+  $objCrypt->SetShopLogin(isset($_GET["a"])?$_GET["a"]:''); 
+  $objCrypt->SetEncryptedString(isset($_GET["b"])?$_GET["b"]:'');
+  // ERROR - WRONG RESPONSE WRONG GATEWAY
+  if (!$objCrypt->Decrypt()) {
+    watchdog('gestpay', 'ERROR - WRONG RESPONSE WRONG GATEWAY: !error_code, !error_description', array('!error_code' => $objCrypt->GetErrorCode(),'!error_description' => $objCrypt->GetErrorDescription()),WATCHDOG_ERROR);
+    $msg = t('Sorry, an occurred occurred while processing payment with gateway.<br/>Please contact store administrator at <a href="mailto:!store_email">!store_email</a>.<br/>Error code: <b>!error_code</b>, Error description: <b>!error_description</b>',array('!store_email' => variable_get('uc_store_email',''),'!error_code'=>$objCrypt->GetErrorCode(),'!error_description'=>$objCrypt->GetErrorDescription()));
+    drupal_set_message($msg,'error');   
+  }
+  // parsing response
+  $gp_shoplogin=$objCrypt->GetShopLogin();
+  $gp_currency=$objCrypt->GetCurrency();
+  $gp_amount=$objCrypt->GetAmount();
+  $gp_shoptransactionid=$objCrypt->GetShopTransactionID();
+  $gp_buyername=$objCrypt->GetBuyerName();
+  $gp_buyeremail=$objCrypt->GetBuyerEmail();
+  $gp_transactionresult=$objCrypt->GetTransactionResult();
+  $gp_authorizationcode=$objCrypt->GetAuthorizationCode();
+  $gp_errorcode=$objCrypt->GetErrorCode();
+  $gp_errordescription=$objCrypt->GetErrorDescription();
+  $gp_errorbanktransactionid=$objCrypt->GetBankTransactionID();
+  $gp_alertcode=$objCrypt->GetAlertCode();
+  $gp_alertdescription=$objCrypt->GetAlertDescription();
+  $gp_custominfo=$objCrypt->GetCustomInfo();
+
+  $gp_transactionresult=$objCrypt->GetTransactionResult(); 
+  // loading order from ubercart
+  $order = uc_order_load($gp_shoptransactionid);
+  // ERROR - ORDER NOT IN CHECKOUT
+  if ($order === FALSE) {
+    watchdog('gestpay', 'ERROR - ORDER NOT IN CHECKOUT STATE OR NOT FOUND, received response !gp_transactionresult for payment from gateway but order #!gp_shoptransactionid is not in "in_checkout" state', array('!gp_shoptransactionid' => $gp_shoptransactionid,'!gp_transactionresult' => $gp_transactionresult),WATCHDOG_ERROR);
+    drupal_set_message(t('Order #!gp_shoptransactionid not found, Please try again.',array('!gp_shoptransactionid'=>$gp_shoptransactionid)),'warning');
+    drupal_goto('cart');
+  }
+ 
+  if ($gp_transactionresult != "OK") {
+    // ERROR - PAYMENT NOT OK
+    if (!$serverToServer) {
+      uc_order_comment_save($order->order_id, 0, t('Payment not completed, response: !gp_transactionresult', array('!gp_transactionresult' => $gp_transactionresult)), 'admin');
+      watchdog('gestpay', 'ERROR - PAYMENT NOT COMPLETED, response: !gp_transactionresult', array('!gp_transactionresult' => $gp_transactionresult),WATCHDOG_ERROR);
+      drupal_set_message(t('Payment not completed for order #!gp_shoptransactionid. Please try again.',array('!gp_shoptransactionid'=>$gp_shoptransactionid)),'error');
+      uc_order_update_status($order->order_id, 'canceled');
+      drupal_goto('cart');
+    }
+  } else {
+     // NOTICE - PAYMENT OK
+    $payed=TRUE;
+  }
+  
+  // ACTIONS AFTER PAYMENT
+  if ($payed) {
+    if ($serverToServer) {
+      // changed email
+      if ($gp_buyeremail !== strtolower($order->primary_email)) {
+        uc_order_comment_save($order->order_id, 0, t('Customer used a different e-mail address during payment: !email', array('!email' => $gp_buyeremail)), 'admin');
+      }
+      watchdog('gestpay', 'NOTICE - PAYMENT OK, response: !gp_transactionresult, order #!gp_shoptransactionid, amount !amount', array('!gp_transactionresult' => $gp_transactionresult,'!gp_shoptransactionid'=>$gp_shoptransactionid,'!amount'=>$gp_amount),WATCHDOG_NOTICE);
+      $comment = t('Payment approved by Gestpay, order !gp_shoptransactionid, auth. code !gp_authorizationcode', array('!gp_shoptransactionid' => $gp_shoptransactionid,'!gp_authorizationcode'=>$gp_authorizationcode));
+      uc_payment_enter($order->order_id, 'gestpay', $gp_amount, 0, NULL, $comment);
+      
+    } else {
+      
+      // close order
+      uc_order_comment_save($order->order_id, 0, t('Positive response from Gestpay Banca Sella.'), 'order', 1, TRUE);
+      uc_cart_empty(uc_cart_get_id());
+      
+      $_SESSION['cart_order'] = $order->order_id;
+      unset($_SESSION['uc_checkout'][$order->order_id]['do_review']);
+      $_SESSION['uc_checkout'][$order->order_id]['do_complete'] = TRUE;
+      drupal_goto('cart/checkout/complete');
+      
+    }
+  }
+  
+}
+
+
+/**
+ * Elaborate response frrm Banca Sella.
+ */
+function _gestpay_post_url($type) {
+  $post_url = variable_get('uc_gestpay_demo', TRUE) ? 'https://testecomm.sella.it/gestpay/pagam.asp' : 'https://ecomm.sella.it/gestpay/pagam.asp';
+  return $post_url;
+}
+
+
+/**
+ * Elaborate response frrm Banca Sella.
+ */
+function _gestpay_get_domain() {
+  $gestpay_domain = variable_get('uc_gestpay_demo', TRUE) ? 'testecomm.sella.it' : 'ecomm.sella.it';
+  return $gestpay_domain;
+}
+
+
+
+
+
+
+
